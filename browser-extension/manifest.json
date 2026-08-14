@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "dsh-annotate",
+  "version": "0.1.0",
+  "description": "Visual page annotations for DeepSeek Harness",
+  "permissions": ["activeTab", "scripting", "storage", "tabs"],
+  "host_permissions": ["<all_urls>"],
+  "background": { "service_worker": "background.js" },
+  "action": {
+    "default_title": "dsh-annotate",
+    "default_popup": "popup.html"
+  }
+}

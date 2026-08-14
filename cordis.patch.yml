@@ -1,0 +1,10 @@
+- insert:
+    - id: dsh-annotate
+      name: dsh-annotate
+      config:
+        host: 127.0.0.1
+        port: 43119
+        allowedExtensionId: ''
+        requestTimeoutMs: 300000
+        maxPayloadBytes: 16777216
+        includeScreenshot: true
