@@ -2,7 +2,20 @@
 
 Visual browser feedback for DeepSeek Harness. `/annotate` asks the companion Chrome extension to enter selection mode; each selected element contributes a selector, DOM facts, computed style highlights, accessibility data, a comment, and an optional viewport screenshot to the agent's next turn.
 
-## Install
+English | [中文](README.zh.md)
+
+## Why this exists 💡
+
+Browser UI problems are difficult to describe precisely through plain text. `dsh-annotate` lets you point at the relevant element and send the Agent the surrounding browser facts, so visual feedback stays attached to the page element instead of becoming a vague description or a copied screenshot.
+
+## Features ✨
+
+- Select elements directly in Chrome or Chromium through `/annotate`.
+- Capture selectors, DOM facts, computed-style highlights, accessibility data, comments, and optional viewport screenshots.
+- Send structured annotations to the Agent through a local loopback WebSocket bridge.
+- Restrict browser connections by loopback host, extension origin, and optional extension ID.
+
+## Install 📦
 
 Add the plugin project to a Harness profile:
 
@@ -19,7 +32,7 @@ Then install the companion extension:
 
 For tighter local authorization, copy the extension ID shown in the popup into `allowedExtensionId` in a later Harness patch layer.
 
-## Use
+## Use 🚀
 
 ```text
 /annotate
@@ -28,7 +41,7 @@ For tighter local authorization, copy the extension ID shown in the popup into `
 
 Click an element, enter its comment, and repeat as needed. **Submit** sends all captured facts and the visible-tab screenshot to the agent. **Escape** cancels.
 
-## Configure
+## Configure ⚙️
 
 ```yaml
 - id: dsh-annotate
@@ -44,7 +57,7 @@ Click an element, enter its comment, and repeat as needed. **Submit** sends all 
 
 The server refuses non-loopback hosts and browser connections whose origin is not `chrome-extension://`. An empty `allowedExtensionId` accepts any locally installed Chrome extension; set the exact ID for stricter isolation.
 
-## Develop
+## Develop 🧑‍💻
 
 ```sh
 pnpm install
@@ -53,14 +66,14 @@ pnpm run check
 
 Reload the unpacked browser extension after editing its files.
 
-## Scope
+## Scope 🎯
 
 Version 0.1 targets one local Chrome/Chromium browser, one active tab, and visible-viewport screenshots. Remote browsers, full-page capture, edit recording, and inline draggable note cards are deferred.
 
-## License
+## License 📄
 
 MIT
 
-## Credits
+## Credits 🙏
 
 The interaction is inspired by [`pi-annotate`](https://github.com/nicobailon/pi-annotate). This implementation is built around Harness's human-command, attachment, and Agent APIs and uses a small loopback WebSocket bridge instead of a native-messaging host.
