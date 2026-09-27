@@ -1,13 +1,29 @@
 {
   "manifest_version": 3,
   "name": "dsh-annotate",
-  "version": "0.1.0",
-  "description": "Visual page annotations for DeepSeek Harness",
+  "version": "0.2.0",
+  "description": "选择页面元素，把结构化标注直接发送到 DeepSeek Harness 当前会话",
   "permissions": ["activeTab", "scripting", "storage", "tabs"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },
+  "options_ui": { "page": "options.html", "open_in_tab": true },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
   "action": {
-    "default_title": "dsh-annotate",
-    "default_popup": "popup.html"
+    "default_title": "标注当前页面（点击开始）",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png"
+    }
+  },
+  "commands": {
+    "start-annotation": {
+      "suggested_key": { "default": "Alt+Shift+A", "mac": "Alt+Shift+A" },
+      "description": "在当前页面开始标注"
+    }
   }
 }

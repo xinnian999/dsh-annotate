@@ -2,7 +2,7 @@
 
 import { randomUUID } from 'node:crypto'
 import { WebSocket, WebSocketServer, type RawData } from 'ws'
-import type { AnnotationResult, ClientMessage } from './protocol.js'
+import type { AnnotationResult, ClientMessage, ServerMessage } from './protocol.js'
 import { parseClientMessage } from './protocol.js'
 
 interface PendingRequest {
@@ -22,14 +22,24 @@ export interface BridgeConfig {
   maxPayloadBytes: number
 }
 
+/**
+ * Deliver an annotation the user started from the browser, with no pending
+ * `/annotate` request. Resolves with the session it landed in for the ack.
+ */
+export type SubmitHandler = (result: AnnotationResult) => Promise<{ sessionId?: string } | undefined>
+
 /** One connected browser extension and its pending annotation requests. */
 export class AnnotationBridge {
   private readonly server: WebSocketServer
   private readonly ready: Promise<void>
   private client: WebSocket | undefined
+  private clientExtensionId: string | undefined
   private pending = new Map<string, PendingRequest>()
 
-  constructor(private readonly config: BridgeConfig) {
+  constructor(
+    private readonly config: BridgeConfig,
+    private readonly onSubmit?: SubmitHandler,
+  ) {
     this.server = new WebSocketServer({
       host: config.host,
       port: config.port,
@@ -47,12 +57,19 @@ export class AnnotationBridge {
     return this.client?.readyState === WebSocket.OPEN
   }
 
+  /** The connected extension's id, or `undefined` while none is connected. */
+  get extensionId(): string | undefined {
+    return this.connected ? this.clientExtensionId : undefined
+  }
+
   /** Request annotation in the connected browser. */
   async annotate(url: string | undefined, signal: AbortSignal): Promise<AnnotationResult> {
     await this.ready
     signal.throwIfAborted()
-    const client = this.client
-    if (client?.readyState !== WebSocket.OPEN) throw new Error('The dsh-annotate browser extension is not connected.')
+    // An MV3 service worker is recycled after ~30s idle and that drops the
+    // socket with no host-side signal, so give a reconnecting extension a
+    // moment instead of failing the instant the command runs.
+    await this.waitForClient(signal)
     const requestId = randomUUID()
 
     return new Promise<AnnotationResult>((resolve, reject) => {
@@ -63,7 +80,7 @@ export class AnnotationBridge {
       )
       this.pending.set(requestId, { resolve, reject, timer, signal, onAbort })
       signal.addEventListener('abort', onAbort, { once: true })
-      client.send(JSON.stringify({ type: 'start', requestId, ...(url === undefined ? {} : { url }) }))
+      this.notify({ type: 'start', requestId, ...(url === undefined ? {} : { url }) })
     })
   }
 
@@ -88,6 +105,7 @@ export class AnnotationBridge {
           greeted = true
           this.client?.terminate()
           this.client = socket
+          this.clientExtensionId = message.extensionId
           return
         }
         this.handle(message)
@@ -98,15 +116,66 @@ export class AnnotationBridge {
     socket.on('close', () => {
       if (this.client !== socket) return
       this.client = undefined
+      this.clientExtensionId = undefined
       for (const requestId of this.pending.keys()) this.settle(requestId, new Error('browser extension disconnected'))
     })
   }
 
   private handle(message: ClientMessage): void {
     if (message.type === 'hello') return
+    if (message.type === 'submit') {
+      void this.handleSubmit(message.result)
+      return
+    }
     if (message.type === 'result') this.settle(message.requestId, undefined, message.result)
     else if (message.type === 'cancel') this.settle(message.requestId, new Error('annotation was cancelled in the browser'))
     else this.settle(message.requestId, new Error(message.message))
+  }
+
+  /**
+   * Deliver a browser-initiated submission and report the outcome back to the
+   * extension, which surfaces it as a toolbar badge.
+   */
+  private async handleSubmit(result: AnnotationResult): Promise<void> {
+    try {
+      const outcome = await this.onSubmit?.(result)
+      this.notify({
+        type: 'ack',
+        ok: true,
+        elements: result.elements.length,
+        ...(outcome?.sessionId === undefined ? {} : { sessionId: outcome.sessionId }),
+      })
+    } catch (error) {
+      this.notify({ type: 'ack', ok: false, message: error instanceof Error ? error.message : String(error) })
+    }
+  }
+
+  /**
+   * Wait for an authenticated extension to be connected.
+   *
+   * @param signal - aborts the wait.
+   * @param timeoutMs - how long to wait before giving up.
+   * @throws when no extension connects in time.
+   */
+  private async waitForClient(signal: AbortSignal, timeoutMs = 10_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs
+    for (;;) {
+      signal.throwIfAborted()
+      if (this.client?.readyState === WebSocket.OPEN) return
+      if (Date.now() >= deadline) {
+        throw new Error(
+          'The dsh-annotate browser extension is not connected. Open the browser and click the dsh-annotate toolbar icon.',
+        )
+      }
+      await new Promise(resolve => setTimeout(resolve, 150))
+    }
+  }
+
+  /** Send one frame to the connected extension, ignoring a closed or absent socket. */
+  private notify(message: ServerMessage): void {
+    const client = this.client
+    if (client?.readyState !== WebSocket.OPEN) return
+    client.send(JSON.stringify(message))
   }
 
   private settle(requestId: string, error?: Error, result?: AnnotationResult): void {

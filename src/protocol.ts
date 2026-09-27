@@ -27,6 +27,13 @@ export type ClientMessage =
   | { type: 'result'; requestId: string; result: AnnotationResult }
   | { type: 'cancel'; requestId: string }
   | { type: 'error'; requestId: string; message: string }
+  /** Unsolicited submission: the user started annotating from the browser. */
+  | { type: 'submit'; result: AnnotationResult }
+
+/** Host-to-extension frames. */
+export type ServerMessage =
+  | { type: 'start'; requestId: string; url?: string }
+  | { type: 'ack'; ok: boolean; elements?: number; sessionId?: string; message?: string }
 
 /** Decode and minimally validate one browser message. */
 export function parseClientMessage(data: Buffer, maxPayloadBytes: number): ClientMessage {
@@ -44,6 +51,9 @@ export function parseClientMessage(data: Buffer, maxPayloadBytes: number): Clien
     return message as ClientMessage
   }
   if (message.type === 'result' && typeof message.requestId === 'string' && isAnnotationResult(message.result)) {
+    return message as unknown as ClientMessage
+  }
+  if (message.type === 'submit' && isAnnotationResult(message.result)) {
     return message as unknown as ClientMessage
   }
   throw new Error('browser annotation message has an unsupported format')

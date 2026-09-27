@@ -25,6 +25,29 @@ describe('annotation protocol', () => {
     expect(() => decodePngDataUrl('data:image/jpeg;base64,AQID')).toThrow('PNG')
   })
 
+  it('accepts an unsolicited submit and rejects a malformed one', () => {
+    const result = {
+      url: 'https://example.com',
+      viewport: { width: 1280, height: 720 },
+      elements: [{
+        selector: '#submit',
+        tagName: 'button',
+        classes: [],
+        text: 'Submit',
+        comment: 'Too small to tap.',
+        rect: { x: 0, y: 0, width: 10, height: 10 },
+        attributes: {},
+        styles: {},
+        accessibility: { focusable: true, disabled: false },
+      }],
+    }
+    expect(parseClientMessage(Buffer.from(JSON.stringify({ type: 'submit', result })), 10_000))
+      .toEqual({ type: 'submit', result })
+    expect(() => parseClientMessage(
+      Buffer.from(JSON.stringify({ type: 'submit', result: { url: 1 } })), 10_000,
+    )).toThrow('unsupported format')
+  })
+
   it('renders element facts and comments', () => {
     const text = renderAnnotation({
       url: 'https://example.com',

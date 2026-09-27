@@ -4,7 +4,16 @@
       config:
         host: 127.0.0.1
         port: 43119
+        # Empty accepts any locally installed extension; set the exact id shown
+        # by `/annotate-status` (or the extension's options page) to lock it down.
         allowedExtensionId: ''
         requestTimeoutMs: 300000
         maxPayloadBytes: 16777216
         includeScreenshot: true
+        # Fixed target session for browser-initiated submissions. Empty follows
+        # the session where you last sent a message; `/annotate-pin` overrides
+        # both for the current run.
+        sessionId: ''
+        # true: a submission wakes the agent immediately. false: queue it for
+        # the next turn without starting one.
+        wake: true
