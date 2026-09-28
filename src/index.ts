@@ -4,14 +4,14 @@ import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-agent'
 import type {} from '@deepseek-ai/dsh-attachment'
 import type {} from '@deepseek-ai/dsh-commands'
-import type { SessionId } from '@deepseek-ai/dsh-session'
+import type { Session, SessionId } from '@deepseek-ai/dsh-session'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import Schema from '@deepseek-ai/schemastery'
 import { AnnotationBridge } from './bridge.js'
 import { decodePngDataUrl, renderAnnotation, type AnnotationResult } from './protocol.js'
 
 export const name = 'dsh-annotate'
-export const inject = ['commands', 'attachments', 'agents']
+export const inject = ['commands', 'attachments', 'agents', 'sessions']
 
 /** Deployment configuration for the local browser bridge. */
 export interface Config {
@@ -23,6 +23,7 @@ export interface Config {
   includeScreenshot: boolean
   sessionId: string
   wake: boolean
+  preferDraft: boolean
 }
 
 export const Config: Schema<Config> = Schema.object({
@@ -37,6 +38,9 @@ export const Config: Schema<Config> = Schema.object({
   ),
   wake: Schema.boolean().default(true).description(
     'true: a submission starts the agent immediately; false: queue it for the next turn without waking the agent.',
+  ),
+  preferDraft: Schema.boolean().default(true).description(
+    'true: a New Session the user opened but never messaged in (a live blank session) wins over the last-messaged session.',
   ),
 })
 
@@ -55,9 +59,10 @@ export function apply(ctx: Context, config: Config): void {
     throw new Error('dsh-annotate host must be a loopback address')
   }
 
-  /** Session the user most recently sent a message in. */
+  /** Session the user most recently sent a message in, and when it happened. */
   let lastActiveSessionId: SessionId | undefined
-  /** Session pinned by `/annotate-pin`; overrides the last-active rule. */
+  let lastActiveAt = 0
+  /** Session pinned by `/annotate-pin`; overrides every other rule. */
   let pinnedSessionId: SessionId | undefined
 
   // A genuine user turn is the strongest available signal of "the session I am
@@ -72,20 +77,53 @@ export function apply(ctx: Context, config: Config): void {
     if (event.type !== 'user/message') return
     if (event.data.source.kind !== 'user') return
     lastActiveSessionId = session.id
+    lastActiveAt = Date.now()
   })
+
+  /**
+   * The New Session the user has open but never messaged in: a live Session with
+   * no events yet.
+   *
+   * Starting a New Session creates the Session (and composes its live Agent)
+   * right away, and it stays blank until the first message — so the newest blank
+   * Session is the freshest signal for "the conversation I am looking at" when
+   * the user has not typed there yet. That is exactly the case where the
+   * last-messaged Session would be the wrong conversation, or where nothing at
+   * all resolves (`session/event` never fired for the new Session).
+   *
+   * A client's viewed Session is not visible to the host, so this stays a
+   * heuristic and `preferDraft: false` disables it. Blank Sessions whose Agent is
+   * gone (an old draft) are ignored, so a delivery never targets a dead session.
+   */
+  function newestDraft(): Session | undefined {
+    let newest: Session | undefined
+    for (const session of ctx.sessions.list()) {
+      if (session.seq !== 0) continue
+      if (session.header.origin === 'subagent') continue
+      if (ctx.agents.get(session.id) === undefined) continue
+      if (newest === undefined || session.header.createdAt > newest.header.createdAt) newest = session
+    }
+    return newest
+  }
 
   /** Resolve the session a browser-initiated annotation should land in. */
   function resolveTarget(): SessionId {
     if (pinnedSessionId !== undefined) return pinnedSessionId
     if (config.sessionId !== '') return config.sessionId as SessionId
+    const draft = config.preferDraft ? newestDraft() : undefined
+    // Whichever happened last wins: a New Session opened after the user's last
+    // message means they moved to a new conversation; a message sent after the
+    // draft was opened means they went back to typing in an older one.
+    if (draft !== undefined && draft.header.createdAt > lastActiveAt) return draft.id
     if (lastActiveSessionId !== undefined) return lastActiveSessionId
+    if (draft !== undefined) return draft.id
     const roots = ctx.agents.roots()
     const only = roots.length === 1 ? roots[0] : undefined
     if (only !== undefined) return only.id
     throw new Error(
       roots.length === 0
-        ? 'no target session: send a message in DeepSeek Harness, or run /annotate-pin there'
-        : `no target session: ${roots.length} sessions are live — run /annotate-pin in the one you want`,
+        ? '没有可接收标注的会话：请先在 DeepSeek Harness 里打开一个新会话或发一条消息，也可以在该会话里执行 /annotate-pin。'
+        : `有 ${roots.length} 个会话在运行，无法判断标注该进哪一个：请在目标会话里发一条消息、新开一个会话，或在该会话里执行 /annotate-pin。`,
     )
   }
 
@@ -117,7 +155,9 @@ export function apply(ctx: Context, config: Config): void {
   /** Deliver one annotation into an exact session. */
   async function deliver(result: AnnotationResult, sessionId: SessionId): Promise<void> {
     const agent = ctx.agents.get(sessionId)
-    if (agent === undefined) throw new Error(`session ${sessionId} has no live agent`)
+    if (agent === undefined) {
+      throw new Error(`会话 ${sessionId} 没有正在运行的 Agent（可能已关闭）：请在该会话里发一条消息后重试。`)
+    }
     const message = await buildMessage(result)
     if (config.wake) agent.followup(message)
     else agent.inject(message)
@@ -168,7 +208,7 @@ export function apply(ctx: Context, config: Config): void {
         kind: 'success',
         text: previous === undefined
           ? '当前没有固定任何会话。'
-          : '已清除固定，跟随你最近发过消息的会话。',
+          : '已清除固定，跟随你新开的会话或最近发过消息的会话。',
       }
     },
   })
@@ -177,11 +217,12 @@ export function apply(ctx: Context, config: Config): void {
     name: 'annotate-status',
     description: '查看浏览器标注当前会进入哪个会话。',
     handler() {
+      const draft = config.preferDraft ? newestDraft() : undefined
       let target: string
       try {
         target = resolveTarget()
       } catch (error) {
-        target = `none — ${error instanceof Error ? error.message : String(error)}`
+        target = `无 — ${error instanceof Error ? error.message : String(error)}`
       }
       return {
         kind: 'success',
@@ -189,6 +230,7 @@ export function apply(ctx: Context, config: Config): void {
           `扩展：${bridge.connected ? `已连接（${bridge.extensionId}）` : '未连接'}`,
           `已固定：${pinnedSessionId ?? '—'}`,
           `最近活跃：${lastActiveSessionId ?? '—'}`,
+          `新会话草稿：${draft?.id ?? '—'}`,
           `目标会话：${target}`,
         ].join('\n'),
       }

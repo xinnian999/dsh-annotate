@@ -20,9 +20,10 @@
 - `protocol.ts` —— 新增 `submit` 消息（无 `requestId` 的直接提交）与 `ServerMessage` 类型。
 - `bridge.ts` —— 接受**未经请求**的提交并经 `onSubmit` 回调投递；处理完回 `ack` 帧让扩展显示徽章；
   记录已连接扩展的 id 供 `/annotate-status` 显示。
-- `index.ts` —— `inject` 增加 `agents`；用 `ctx.on('session/event', …)`
+- `index.ts` —— `inject` 增加 `agents` 与 `sessions`；用 `ctx.on('session/event', …)`
   跟踪**最近发过消息的会话**；新增 `/annotate-pin`、`/annotate-unpin`、`/annotate-status`；
-  配置新增 `sessionId`（固定目标）与 `wake`（是否立即唤醒 agent）。
+  配置新增 `sessionId`（固定目标）、`wake`（是否立即唤醒 agent）与 `preferDraft`
+  （是否优先投给「刚打开、还没发消息的新会话」）。
 
 **扩展侧（`browser-extension/`）**
 
@@ -71,12 +72,28 @@ Chrome 会在扩展 **30 秒无事件、无扩展 API 调用**后回收 service 
 
 1. `/annotate-pin` 固定的会话（本次运行内有效）
 2. 配置里的 `sessionId`（写死在 profile 里）
-3. **最近发过用户消息的会话** —— 也就是你最后打字的那个
-4. 只剩一个顶层 agent 时用它
+3. **刚打开的「新会话」**（你点了「新会话」但还没打字，见下）
+4. **最近发过用户消息的会话** —— 也就是你最后打字的那个
+5. 只剩一个顶层 agent 时用它
 
-都不满足就报错，不会瞎投。
+都不满足就报错，不会瞎投。第 3 条和第 4 条按时间比：**谁更近听谁的** ——
+先发消息、之后才新开会话，就进新会话；新开会话之后又回老会话打字，就进老会话。
 
-第 3 条只认 `event.data.source.kind === 'user'` 的 `user/message`。这一点很关键：
+#### 「新会话」是怎么认出来的
+
+点了「新会话」之后、你还没打字时，宿主其实已经把这个会话建好了：客户端会调
+`session/create`，宿主的 `createOrAdopt` 会**连 Agent 一起建**（`ctx.agents.create`）。
+所以此刻它是一个「活着、但一个事件都没有」的会话（`session.seq === 0`），
+`ctx.agents.get(id)` 也拿得到 agent。插件据此把它认成「你正开着的那个新会话」，
+把标注当作它的第一条消息投进去 —— 你在那个空对话里直接就看到标注，
+而不是收到一句「没有目标会话」。
+
+这是**启发式**，不是精确答案：宿主看不到你的选中态，所以「最新一个空会话」也可能
+不是你正在看的那个（比如某个工作区里留着一个更早的空会话，而你在看别的老会话）。
+这种情况可以：在该会话里 `/annotate-pin` 固定，或把配置里的 `preferDraft` 设成 `false`
+关掉这条规则。`/annotate-status` 会同时列出它当前认到的「新会话草稿」和最终目标。
+
+第 4 条只认 `event.data.source.kind === 'user'` 的 `user/message`。这一点很关键：
 goal 轮次、定时任务、别的插件的通知、以及**本插件自己投递的标注**
 都会追加 `user/message`，不过滤的话一次后台注入就能把标注目标抢到别的会话去。
 这个判据不是自己发明的 —— 宿主算 `lastPromptAt` 用的就是同一个
@@ -176,6 +193,9 @@ Click an element, enter its comment, and repeat as needed. **Submit** sends all 
     requestTimeoutMs: 300000
     maxPayloadBytes: 16777216
     includeScreenshot: true
+    sessionId: ''
+    wake: true
+    preferDraft: true
 ```
 
 The server refuses non-loopback hosts and browser connections whose origin is not `chrome-extension://`. An empty `allowedExtensionId` accepts any locally installed Chrome extension; set the exact ID for stricter isolation.

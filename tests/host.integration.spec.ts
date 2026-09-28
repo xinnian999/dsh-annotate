@@ -5,9 +5,11 @@
  */
 
 import { Context } from '@deepseek-ai/cordis'
+import type { SessionId } from '@deepseek-ai/dsh-session'
 import { WebSocket } from 'ws'
 import { describe, expect, it } from 'vitest'
 import * as annotate from '../src/index.js'
+import type { AnnotationResult } from '../src/protocol.js'
 
 const ELEMENT = {
   selector: '#submit',
@@ -21,8 +23,15 @@ const ELEMENT = {
   accessibility: { role: 'button', name: 'Submit', focusable: true, disabled: false },
 }
 
-function result(elements = [ELEMENT]) {
+function result(elements: AnnotationResult['elements'] = [ELEMENT]): AnnotationResult {
   return { url: 'https://example.com/page', viewport: { width: 1280, height: 720 }, elements }
+}
+
+/** One live Session as the plugin sees it through `ctx.sessions`. */
+interface StubSession {
+  id: SessionId
+  seq: number
+  header: { createdAt: number }
 }
 
 interface Harness {
@@ -31,16 +40,24 @@ interface Harness {
   followups: any[]
   images: { count: number }
   /** Emit the event the host fires when a user turn is appended. */
-  userTurn: (sessionId: string) => void
+  userTurn: (sessionId: string, kind?: 'user' | 'plugin') => void
   close: () => Promise<void>
 }
 
 let nextPort = 43_990
 
-/** Boot the plugin with stub services and return handles onto its behaviour. */
+/**
+ * Boot the plugin with stub services and return handles onto its behaviour.
+ *
+ * @param overrides - plugin config overrides.
+ * @param sessionIds - live sessions that already have events (i.e. messaged).
+ * @param drafts - live blank sessions: `[id, createdAt]` pairs, the New Session
+ *   rows a client created but never messaged in.
+ */
 async function boot(
   overrides: Record<string, unknown> = {},
   sessionIds = ['session-a'],
+  drafts: [string, number][] = [],
 ): Promise<Harness> {
   const port = ++nextPort
   const ctx = new Context()
@@ -48,6 +65,7 @@ async function boot(
   const followups: any[] = []
   const images = { count: 0 }
   const agents = new Map<string, any>()
+  const sessions: StubSession[] = []
   for (const id of sessionIds) {
     agents.set(id, {
       id,
@@ -55,6 +73,16 @@ async function boot(
       followup: (message: any) => followups.push(message),
       inject: (message: any) => followups.push(message),
     })
+    sessions.push({ id: id as SessionId, seq: 4, header: { createdAt: 0 } })
+  }
+  for (const [id, createdAt] of drafts) {
+    agents.set(id, {
+      id,
+      status: 'idle',
+      followup: (message: any) => followups.push(message),
+      inject: (message: any) => followups.push(message),
+    })
+    sessions.push({ id: id as SessionId, seq: 0, header: { createdAt } })
   }
   ctx.provide('commands', {
     register: (command: any) => {
@@ -72,6 +100,9 @@ async function boot(
     get: (id: string) => agents.get(id),
     roots: () => [...agents.values()],
   })
+  ctx.provide('sessions', {
+    list: () => sessions,
+  })
 
   const fiber: any = await ctx.plugin(annotate, {
     host: '127.0.0.1',
@@ -82,6 +113,7 @@ async function boot(
     includeScreenshot: true,
     sessionId: '',
     wake: true,
+    preferDraft: true,
     ...overrides,
   })
 
@@ -91,10 +123,11 @@ async function boot(
     followups,
     images,
     userTurn: (sessionId: string, kind: 'user' | 'plugin' = 'user') => {
-      ctx.emit('session/event', { id: sessionId }, {
+      // The plugin only reads `session.id` off this carrier, so a stub is enough.
+      ctx.emit('session/event', { id: sessionId as SessionId } as any, {
         type: 'user/message',
         data: { source: { kind } },
-      })
+      } as any)
     },
     close: async () => {
       await fiber.dispose()
@@ -227,6 +260,78 @@ describe('browser-initiated annotations', () => {
       const ack = await submit(socket)
 
       expect(ack.sessionId).toBe('session-a')
+    } finally {
+      socket.close()
+      await harness.close()
+    }
+  })
+
+  it('delivers into a New Session the user opened but never messaged in', async () => {
+    // The user clicks "New Session" (the host creates a blank Session plus its
+    // Agent) and annotates right away, without typing. Nothing has ever set the
+    // last-active session, so this used to fail outright.
+    const harness = await boot({}, ['session-a', 'session-b'], [['session-draft', Date.now()]])
+    const socket = await connect(harness)
+    try {
+      const ack = await submit(socket)
+
+      expect(ack).toMatchObject({ type: 'ack', ok: true, elements: 1, sessionId: 'session-draft' })
+      expect(harness.followups).toHaveLength(1)
+      expect(harness.followups[0].content[0].text).toContain('对比度太低，看不清。')
+    } finally {
+      socket.close()
+      await harness.close()
+    }
+  })
+
+  it('prefers a message sent after the New Session was opened', async () => {
+    const harness = await boot({}, ['session-a'], [['session-draft', Date.now() - 60_000]])
+    const socket = await connect(harness)
+    try {
+      // Typing in an older conversation AFTER the draft was opened means the
+      // user went back to that one, so the draft must not win.
+      harness.userTurn('session-a')
+
+      const ack = await submit(socket)
+
+      expect(ack.sessionId).toBe('session-a')
+    } finally {
+      socket.close()
+      await harness.close()
+    }
+  })
+
+  it('ignores the New Session when preferDraft is disabled', async () => {
+    // The same live sessions as the test above, with the draft preference off:
+    // nothing identifies a target any more, so the submission says so instead of
+    // picking the draft.
+    const harness = await boot(
+      { preferDraft: false },
+      ['session-a', 'session-b'],
+      [['session-draft', Date.now()]],
+    )
+    const socket = await connect(harness)
+    try {
+      const ack = await submit(socket)
+
+      expect(ack).toMatchObject({ type: 'ack', ok: false })
+      expect(ack.message).toContain('无法判断')
+      expect(harness.followups).toHaveLength(0)
+    } finally {
+      socket.close()
+      await harness.close()
+    }
+  })
+
+  it('reports an actionable failure when no session can receive the annotation', async () => {
+    const harness = await boot({}, [])
+    const socket = await connect(harness)
+    try {
+      const ack = await submit(socket)
+
+      expect(ack).toMatchObject({ type: 'ack', ok: false })
+      expect(ack.message).toContain('没有可接收标注的会话')
+      expect(harness.followups).toHaveLength(0)
     } finally {
       socket.close()
       await harness.close()
